@@ -1,0 +1,13 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "default_agent": "build",
+  "agent": {
+    "lead": { "disable": true },
+    "planner": { "disable": true },
+    "implementer": { "disable": true },
+    "explorer": { "disable": true },
+    "tester": { "disable": true },
+    "reviewer": { "disable": true },
+    "security": { "disable": true }
+  }
+}

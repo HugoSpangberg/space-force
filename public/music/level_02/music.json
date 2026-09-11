@@ -1,0 +1,17 @@
+{
+  "id": "level_01_attempt_02",
+  "title": "Space Force Theme",
+  "source": "full-arrangement.wav",
+  "loop": "space-force-theme-loop.ogg",
+  "durationSeconds": 60,
+  "sampleRate": 48000,
+  "channels": 2,
+  "type": "single-master adaptive mix",
+  "phaseTreatment": {
+    "ASTEROID FIELD": "soft, low-pass atmospheric mix",
+    "DRONE SQUAD": "open midrange combat mix",
+    "INTERCEPTOR SURGE": "near-full energetic mix",
+    "THE ORBITAL WARDEN": "full-brightness boss mix",
+    "SECTOR CLEAR": "soft closing mix"
+  }
+}

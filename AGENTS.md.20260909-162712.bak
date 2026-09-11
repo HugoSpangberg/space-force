@@ -1,0 +1,33 @@
+<!-- ai-kit:start -->
+# Project instructions
+
+## Start here
+
+- Read `.ai/WORKFLOW.md` for the main-agent workflow and completion contract.
+- Read `docs/ai/PROJECT_CONTEXT.md` when present before changing product behavior.
+- Read `docs/ai/ARCHITECTURE.md` when present before changing boundaries or data flow.
+- Use only commands documented in `docs/ai/COMMANDS.md` or discovered from the repository.
+- Record material technical decisions in existing project documentation; avoid creating empty documents.
+
+## Working contract
+
+- Preserve existing behavior unless the task explicitly changes it.
+- Keep secrets, generated output, runtime data, and personal data out of Git.
+- Inspect the working tree before editing and preserve unrelated changes.
+- Run the smallest relevant verification first, then broader checks when risk justifies them.
+- Never deploy, publish, submit, send messages, or perform destructive data operations without explicit authorization.
+
+## Agent workflow
+
+- The selected tool's main conversation is the lead. In OpenCode select `lead`.
+- Discuss a bounded plan with the user and wait for approval before implementing it. Existing explicit approval remains valid; do not ask again for the same plan.
+- After approval, continue through implementation, verification, and at most two repair rounds until the criteria pass or a specific blocker remains.
+- Only the lead delegates. Specialists return evidence to the lead and do not delegate further.
+- Use explorer and planner roles for bounded read-only discovery and design when useful. A small change does not require every role.
+- Use the implementer for one clearly bounded write scope.
+- Use reviewer, tester, and security roles as independent checks.
+- Do not let multiple agents edit overlapping files concurrently.
+- Use `.ai/HANDOFF.md` for unfinished cross-session or cross-model work.
+- Never silently switch from a local model to a cloud model, or invoke a different AI client as a worker.
+- Keep technical instructions and agent artifacts in English. Speak Swedish with the user unless they request another language.
+<!-- ai-kit:end -->

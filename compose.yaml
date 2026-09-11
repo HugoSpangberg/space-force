@@ -1,0 +1,20 @@
+name: space-force
+services:
+  web:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "0.0.0.0:4176:4176"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:4176"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    profiles: ["share"]
+    command: tunnel --no-autoupdate --url http://web:4176
+    depends_on:
+      web:
+        condition: service_healthy

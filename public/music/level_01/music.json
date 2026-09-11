@@ -1,0 +1,26 @@
+{
+  "id": "level_01",
+  "title": "MASTER_CORE",
+  "bpm": 120,
+  "key": "D minor",
+  "timeSignature": "4/4",
+  "bars": 16,
+  "loopDurationSeconds": 32,
+  "sampleRate": 48000,
+  "channels": 2,
+  "transitionSeconds": 1.5,
+  "stems": {
+    "core": "core.ogg",
+    "drums": "drums.ogg",
+    "bass": "bass.ogg",
+    "synth": "synth.ogg",
+    "percussion": "percussion.ogg",
+    "bossLayer": "boss_layer.ogg"
+  },
+  "states": {
+    "ambient": ["core"],
+    "combat": ["core", "drums"],
+    "intense": ["core", "drums", "bass", "synth"],
+    "boss": ["core", "drums", "bass", "synth", "percussion", "bossLayer"]
+  }
+}

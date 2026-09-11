@@ -1,0 +1,14 @@
+<!-- ai-kit:start -->
+.ai/runs/
+.ai/backups/
+.ai/HANDOFF.md
+<!-- ai-kit:end -->
+
+# dependencies & build output
+node_modules/
+dist/
+
+# temp & generated test artifacts
+.ai/tmp/
+*.bak
+test-*.png
