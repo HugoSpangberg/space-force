@@ -162,6 +162,8 @@ interface BossSnake {
   dashIndex: number
   dashFrom: BossPortal | null
   dashTo: BossPortal | null
+  transitPhase: 'in' | 'void'
+  transitT: number
   echoes: BossEcho[]
   sweep: BossSweep | null
   nova: BossNova | null
@@ -1244,7 +1246,7 @@ export class Game {
   private spawnBoss() {
     const kind: DesignId = this.course === 'nebula' ? 'boss-orochi' : 'boss-nemesis'
     // the serpent is a longer, tankier-style fight, but slightly less hp than the warden
-    const maxHp = kind === 'boss-orochi' ? 700 : BOSS_MAX
+    const maxHp = kind === 'boss-orochi' ? 640 : BOSS_MAX
     this.boss = { x: this.w / 2, y: -140, r: 84, hp: maxHp, maxHp, t: 0, pattern: 0, tele: 0, atk: 0, dying: false, deathT: 0, kind, portalT: 0, portalIndex: 0 }
     if (kind === 'boss-orochi') {
       const b = this.boss
@@ -1262,7 +1264,7 @@ export class Game {
         moveTarget: null,
         vel: { x: 0, y: 0 },
         speed: SNAKE_SPEED, attackIndex: 0, dashCount: 3, dashIndex: 0,
-        dashFrom: null, dashTo: null, echoes: [], sweep: null, nova: null, rings: [], lasers: [], novaDone: false,
+        dashFrom: null, dashTo: null, transitPhase: 'in', transitT: 0, echoes: [], sweep: null, nova: null, rings: [], lasers: [], novaDone: false,
         attackT: PHASE_INTRO, teleportT: rand(1.6, 2.4),
       }
     }
@@ -1487,26 +1489,56 @@ export class Game {
         sn.targetPortal = 0
         this.openPortals(sn, pts, b, b.pattern)
       }
-      if (sn.modeT >= 0.7 && sn.targetPath.length > 0) this.beginTransit(sn, b)
+      if (sn.modeT >= 0.7 && sn.targetPath.length > 0) this.beginTransit(sn)
     } else if (sn.mode === 'transit') {
+      const entry = sn.targetPath[0]
       const exit = sn.targetPath[1]
-      const step = sn.speed * 3.4 * dt
-      const dx = exit.x - b.x, dy = exit.y - b.y
-      const len = Math.hypot(dx, dy) || 1
-      if (len <= step) {
-        b.x = exit.x; b.y = exit.y
-        sn.dist += len
-        this.pushTrailNode(sn, b.x, b.y)
-        this.spawnShockwave(b.x, b.y, '#22d3ee')
-        this.spawnShockwave(b.x, b.y, '#a78bfa')
-        sn.mode = 'attack'
-        sn.modeT = 0
-        sn.targetPortal = 1
-        this.afterTeleport(sn, b)
+      if (sn.transitPhase === 'in') {
+        // fly the visible serpent into the entry portal
+        const step = sn.speed * 1.7 * dt
+        const dx = entry.x - b.x, dy = entry.y - b.y
+        const len = Math.hypot(dx, dy) || 1
+        if (len <= step + 14) {
+          b.x = entry.x; b.y = entry.y
+          // absorbed — the serpent no longer exists between the portals
+          this.spawnShockwave(entry.x, entry.y, '#22d3ee')
+          this.burst(entry.x, entry.y, 10, '#a78bfa')
+          sn.trail = []
+          sn.tunnels = []
+          sn.dist = 0
+          sn.transitPhase = 'void'
+          // short blink — long enough to read as vanished, not a DPS hole
+          sn.transitT = b.pattern === 2 ? 0.18 : b.pattern === 1 ? 0.2 : 0.22
+        } else {
+          b.x += dx / len * step; b.y += dy / len * step
+          sn.dist += step
+          this.pushTrailNode(sn, b.x, b.y)
+        }
       } else {
-        b.x += dx / len * step; b.y += dy / len * step
-        sn.dist += step
-        this.pushTrailNode(sn, b.x, b.y)
+        // void — not rendered, no collision, untargetable
+        sn.transitT -= dt
+        if (sn.transitT <= 0) {
+          b.x = exit.x; b.y = exit.y
+          sn.tunnels = []
+          // pre-seed the trail so the full body bursts out of the portal,
+          // trailing behind the outward direction (entry -> exit)
+          const dx = exit.x - entry.x, dy = exit.y - entry.y
+          const dl = Math.hypot(dx, dy) || 1
+          const ux = dx / dl, uy = dy / dl
+          sn.trail = []
+          for (let i = 0; i <= SNAKE_SEGS; i++) {
+            const k = SNAKE_SEGS - i
+            sn.trail.push({ d: i * sn.spacing, x: exit.x - ux * k * sn.spacing, y: exit.y - uy * k * sn.spacing })
+          }
+          sn.dist = SNAKE_SEGS * sn.spacing
+          this.spawnShockwave(exit.x, exit.y, '#22d3ee')
+          this.spawnShockwave(exit.x, exit.y, '#a78bfa')
+          this.burst(exit.x, exit.y, 10, '#f472b6')
+          sn.mode = 'attack'
+          sn.modeT = 0
+          sn.targetPortal = 1
+          this.afterTeleport(sn, b)
+        }
       }
     } else if (sn.mode === 'attack') {
       sn.attackT -= dt
@@ -1525,12 +1557,13 @@ export class Game {
     this.updatePortals(sn, dt)
     // build body segments
     sn.prevSegs = sn.segs
-    const segs: BossSnakeSeg[] = [{ x: b.x, y: b.y, r: 26, hidden: sn.mode === 'transit', color: '#ffffff' }]
+    const voided = sn.mode === 'transit' && sn.transitPhase === 'void'
+    const segs: BossSnakeSeg[] = [{ x: b.x, y: b.y, r: 26, hidden: voided, color: '#ffffff' }]
     for (let i = 1; i <= SNAKE_SEGS; i++) {
       const p = this.resolveSnakePoint(sn, sn.dist - i * sn.spacing)
       const taper = 1 - i / (SNAKE_SEGS + 4)
       const outside = p.x < -36 || p.x > this.w + 36 || p.y < -36 || p.y > this.h + 36
-      segs.push({ x: p.x, y: p.y, r: 7 + 15 * taper + Math.sin(b.t * 6 - i * 0.35) * 1.2, hidden: p.hidden || outside, color: p.color })
+      segs.push({ x: p.x, y: p.y, r: 7 + 15 * taper + Math.sin(b.t * 6 - i * 0.35) * 1.2, hidden: voided || p.hidden || outside, color: p.color })
     }
     sn.segs = segs
     // body-vs-ship collision (swept on the moving segments)
@@ -1594,7 +1627,9 @@ export class Game {
   }
 
   private openPortals(sn: BossSnake, pts: Array<{ x: number; y: number }>, b: Boss, pattern: number) {
-    const life = pattern === 0 ? 2.2 : pattern === 1 ? 1.7 : 1.3
+    // life must cover the visible fly-in + the void + a buffer
+    const flight = Math.hypot(pts[0].x - b.x, pts[0].y - b.y) / (sn.speed * 1.7)
+    const life = Math.min(3.4, 1.1 + flight + 0.5)
     const decoyCount = pattern === 2 ? 2 : 0
     const portals: BossPortal[] = pts.map((p, i) => ({
       x: p.x, y: p.y, r: 30, color: PORTAL_COLORS[(i + sn.attackIndex) % PORTAL_COLORS.length],
@@ -1611,17 +1646,13 @@ export class Game {
     this.spawnShockwave(b.x, b.y, '#a78bfa')
   }
 
-  private beginTransit(sn: BossSnake, b: Boss) {
-    const from = { x: b.x, y: b.y }
-    const hidden = Math.max(1, Math.hypot(b.x - sn.targetPath[0].x, b.y - sn.targetPath[0].y))
-    const d0 = sn.dist
-    sn.tunnels.push({ d0, d1: d0 + hidden, ex: from.x, ey: from.y, qx: sn.targetPath[0].x, qy: sn.targetPath[0].y, inColor: PORTAL_COLORS[0], outColor: PORTAL_COLORS[1] })
-    sn.dist += hidden
-    this.spawnShockwave(from.x, from.y, '#22d3ee')
-    b.x = sn.targetPath[0].x; b.y = sn.targetPath[0].y
-    this.pushTrailNode(sn, b.x, b.y)
-    sn.dashFrom = { x: from.x, y: from.y, r: 30, color: '#a78bfa', life: 0, max: 1, role: 'in', spin: 0, flash: 0 }
-    sn.dashTo = { x: sn.targetPath[sn.targetPath.length - 1].x, y: sn.targetPath[sn.targetPath.length - 1].y, r: 30, color: '#f472b6', life: 0, max: 1, role: 'out', spin: 0, flash: 0 }
+  private beginTransit(sn: BossSnake) {
+    // the serpent now flies the visible body INTO the entry portal, ceases to
+    // exist in the void, and re-emerges at the exit portal (no fast dash)
+    sn.transitPhase = 'in'
+    sn.transitT = 0
+    sn.dashFrom = null
+    sn.dashTo = null
     sn.mode = 'transit'
     sn.modeT = 0
   }
@@ -1896,25 +1927,6 @@ export class Game {
   private renderSnake(b: Boss) {
     const ctx = this.ctx
     const sn = b.snake!
-    // warp trail: glowing orbs left behind during the teleport transit
-    if (sn.dashFrom && sn.dashTo) {
-      const k = Math.min(12, Math.max(1, Math.floor(sn.length / 22)))
-      for (let j = 0; j < k; j++) {
-        const f = j / k
-        const ox = sn.dashFrom.x + (sn.dashTo.x - sn.dashFrom.x) * f
-        const oy = sn.dashFrom.y + (sn.dashTo.y - sn.dashFrom.y) * f
-        const flick = 0.5 + 0.5 * Math.sin(this.time * 14 + j * 0.9)
-        ctx.save()
-        ctx.globalAlpha = (1 - f) * 0.6 * flick
-        ctx.fillStyle = j % 2 ? '#22d3ee' : '#a78bfa'
-        ctx.shadowColor = ctx.fillStyle
-        ctx.shadowBlur = 12
-        ctx.beginPath()
-        ctx.arc(ox, oy, 4 + 5 * (1 - f), 0, Math.PI * 2)
-        ctx.fill()
-        ctx.restore()
-      }
-    }
     // telegraph path (entry -> exit)
     if (sn.mode === 'telegraph' && sn.targetPath.length >= 2) {
       ctx.save()
