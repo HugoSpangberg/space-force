@@ -158,6 +158,7 @@ interface BossSnake {
   moveT: number
   moveTarget: { x: number; y: number } | null
   vel: { x: number; y: number }
+  slint: number
   speed: number
   teleportT: number
   attackIndex: number
@@ -1270,7 +1271,7 @@ export class Game {
         segs: [], prevSegs: [], spacing, length,
         mode: 'idle', modeT: 0.4, moveT: 0,
         moveTarget: null,
-        vel: { x: 0, y: 0 },
+        vel: { x: 0, y: 0 }, slint: Math.random() * Math.PI * 2,
         speed: SNAKE_SPEED, attackIndex: 0, dashCount: 3, dashIndex: 0,
         dashFrom: null, dashTo: null, transitPhase: 'in', transitT: -1, transitDir: { x: 0, y: 1 }, echoes: [], sweep: null, nova: null, rings: [], lasers: [], novaDone: false,
         attackT: PHASE_INTRO, teleportT: rand(1.6, 2.4),
@@ -1467,7 +1468,16 @@ export class Game {
         }
         const dx = tgt.x - b.x, dy = tgt.y - b.y
         const len = Math.hypot(dx, dy) || 1
-        sn.vel = { x: dx / len, y: dy / len }
+        // slither: add a sinusoidal lateral wobble (perpendicular to the
+        // heading) so the head undulates and the trail-following body snakes
+        // along instead of flying a straight line. Phase accumulates with
+        // distance so the wavelength stays fixed in world space.
+        sn.slint += sp * dt
+        const wob = Math.sin(sn.slint / 130 * Math.PI * 2) * 0.8
+        const wx = dx / len - (dy / len) * wob
+        const wy = dy / len + (dx / len) * wob
+        const wl = Math.hypot(wx, wy) || 1
+        sn.vel = { x: wx / wl, y: wy / wl }
         b.x += sn.vel.x * sp * dt
         b.y += sn.vel.y * sp * dt
         sn.dist += sp * dt
@@ -1505,11 +1515,16 @@ export class Game {
       const penStep = (bodyLen / SWALLOW_DUR) * dt   // drive the head through the portal so the whole body is consumed in SWALLOW_DUR
       if (sn.transitPhase === 'in') {
         if (sn.transitT < 0) {
-          // approach: the visible serpent flies toward the entry portal
+          // approach: the visible serpent slithers toward the entry portal
           const step = sn.speed * 1.7 * dt
           const dx = entry.x - b.x, dy = entry.y - b.y
           const len = Math.hypot(dx, dy) || 1
-          sn.transitDir = { x: dx / len, y: dy / len }
+          sn.slint += step
+          const wob = Math.sin(sn.slint / 130 * Math.PI * 2) * 0.55
+          const wx = dx / len - (dy / len) * wob
+          const wy = dy / len + (dx / len) * wob
+          const wl = Math.hypot(wx, wy) || 1
+          sn.transitDir = { x: wx / wl, y: wy / wl }
           if (len <= step + 12) {
             // reached the mouth — begin being swallowed head-first
             b.x = entry.x; b.y = entry.y
@@ -1517,7 +1532,7 @@ export class Game {
             this.spawnShockwave(entry.x, entry.y, '#22d3ee')
             this.burst(entry.x, entry.y, 8, '#a78bfa')
           } else {
-            b.x += dx / len * step; b.y += dy / len * step
+            b.x += sn.transitDir.x * step; b.y += sn.transitDir.y * step
             sn.dist += step
             this.pushTrailNode(sn, b.x, b.y)
           }
@@ -1679,8 +1694,9 @@ export class Game {
   }
 
   private openPortals(sn: BossSnake, pts: Array<{ x: number; y: number }>, b: Boss, pattern: number) {
-    // life must cover the visible fly-in + the void + a buffer
-    const flight = Math.hypot(pts[0].x - b.x, pts[0].y - b.y) / (sn.speed * 1.7)
+    // life must cover the visible fly-in + the void + a buffer (the slithering
+    // approach is ~12% slower than a straight line, hence the 0.88 factor)
+    const flight = Math.hypot(pts[0].x - b.x, pts[0].y - b.y) / (sn.speed * 1.7 * 0.88)
     const life = Math.min(3.4, 1.1 + flight + 0.5)
     const decoyCount = pattern === 2 ? 2 : 0
     const portals: BossPortal[] = pts.map((p, i) => ({
