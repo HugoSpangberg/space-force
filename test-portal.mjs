@@ -39,6 +39,10 @@ await page.evaluate(() => {
   const rec = () => {
     const g = window.__game
     const sn = g?.boss?.snake
+    // the idle ship still auto-fires, so over a 34s run it would kill the
+    // 360hp head-only boss mid-cycle — pin HP in the 242-245 band, safely
+    // above the P0->P1 boundary (237.6), so no phase transition can fire
+    if (g?.boss && !g.boss.dying && g.boss.hp < 244) g.boss.hp = 245
     if (sn) {
       const b = g.boss
       window.__portalLog.push({
@@ -99,7 +103,9 @@ if (cur) cycles.push(cur)
 
 let pass = true
 const fail = (msg) => { console.log('FAIL: ' + msg); pass = false }
-const complete = cycles.filter(c => c.appr.length > 0 && c.sw.length > 0 && c.vo.length > 0 && c.out.length > 0)
+// a cycle without an `after` frame means the log ended mid-transit (the
+// recorder stops when the browser closes) — skip it, it was never finished
+const complete = cycles.filter(c => c.after && c.appr.length > 0 && c.sw.length > 0 && c.vo.length > 0 && c.out.length > 0)
 console.log(`frames: ${log.length}, cycles: ${cycles.length}, complete: ${complete.length}`)
 
 const full = log.length ? Math.max(...log.map(s => s.total)) : 0

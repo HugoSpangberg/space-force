@@ -131,7 +131,8 @@ const SPAWN_FADE = 0.7
 const PHASE_INTRO = 1.4
 const PHASE_EXIT = 1.05
 
-interface BossPortal { x: number; y: number; r: number; color: string; life: number; max: number; role: 'in' | 'out' | 'decoy'; spin: number; flash: number }
+interface BossPortalPart { a: number; rad: number; sp: number; w: number }
+interface BossPortal { x: number; y: number; r: number; color: string; life: number; max: number; role: 'in' | 'out' | 'decoy'; spin: number; flash: number; parts: BossPortalPart[] }
 interface BossTunnel { d0: number; d1: number; ex: number; ey: number; qx: number; qy: number; inColor: string; outColor: string }
 interface BossTrailNode { d: number; x: number; y: number }
 interface BossSnakeSeg { x: number; y: number; r: number; hidden: boolean; color: string }
@@ -1365,6 +1366,8 @@ export class Game {
       this.beam2 = null
       if (b.snake) {
         // phase transition — clear old threats and reconfigure
+        const wasTransit = b.snake.mode === 'transit'
+        const wasTelegraph = b.snake.mode === 'telegraph'
         b.snake.rings = []
         b.snake.lasers = []
         b.snake.sweep = null
@@ -1377,6 +1380,21 @@ export class Game {
         b.snake.dashIndex = 0
         b.snake.novaDone = false
         b.snake.speed = SNAKE_SPEED * (pattern === 0 ? 1 : pattern === 1 ? 1.35 : 1.75)
+        // never yank the boss out of a portal transit mid-flight: park it in
+        // place (body bunches and stretches, like after a normal emerge) and
+        // give it a short breather before the next teleport
+        if (wasTransit || wasTelegraph) {
+          b.snake.trail = []
+          b.snake.tunnels = []
+          b.snake.dist = 0
+          b.snake.targetPath = []
+          b.snake.targetIdx = 0
+          b.snake.targetPortal = 0
+          b.snake.transitPhase = 'in'
+          b.snake.transitT = 0
+          b.snake.teleportT = rand(0.8, 1.2)
+          if (wasTransit) this.burst(b.x, b.y, 10, '#a78bfa')
+        }
       } else {
         // spawn boss drones on phase 2 and 3
         const count = pattern === 1 ? 3 : pattern === 2 ? 3 : 0
@@ -1698,17 +1716,22 @@ export class Game {
     // approach is ~12% slower than a straight line, hence the 0.88 factor)
     const flight = Math.hypot(pts[0].x - b.x, pts[0].y - b.y) / (sn.speed * 1.7 * 0.88)
     const life = Math.min(3.4, 1.1 + flight + 0.5)
+    const mkParts = (): BossPortalPart[] => {
+      const arr: BossPortalPart[] = []
+      for (let i = 0; i < 14; i++) arr.push({ a: Math.random() * Math.PI * 2, rad: rand(0.5, 2.3) * 30, sp: rand(0.7, 1.3), w: rand(1, 2.2) })
+      return arr
+    }
     const decoyCount = pattern === 2 ? 2 : 0
     const portals: BossPortal[] = pts.map((p, i) => ({
       x: p.x, y: p.y, r: 30, color: PORTAL_COLORS[(i + sn.attackIndex) % PORTAL_COLORS.length],
-      life, max: life, role: i === pts.length - 1 ? 'out' : 'in', spin: rand(-2, 2), flash: 1,
+      life, max: life, role: i === pts.length - 1 ? 'out' : 'in', spin: rand(-2, 2), flash: 1, parts: mkParts(),
     }))
     for (let i = 0; i < decoyCount; i++) {
       const e = i === 0 ? 'left' : 'right'
       const dx = e === 'left' ? 40 : this.w - 40
       const dy = rand(120, this.h - 260)
       if (Math.hypot(dx - this.ship.x, dy - this.ship.y) < 150) continue
-      portals.push({ x: dx, y: dy, r: 30, color: PORTAL_COLORS[(i + 3) % PORTAL_COLORS.length], life, max: life, role: 'decoy', spin: rand(-3, 3), flash: 1 })
+      portals.push({ x: dx, y: dy, r: 30, color: PORTAL_COLORS[(i + 3) % PORTAL_COLORS.length], life, max: life, role: 'decoy', spin: rand(-3, 3), flash: 1, parts: mkParts() })
     }
     sn.portals = portals
     this.spawnShockwave(b.x, b.y, '#a78bfa')
@@ -1942,6 +1965,18 @@ export class Game {
       p.life -= dt
       p.flash = Math.max(0, p.flash - dt * 3)
       p.spin += dt
+      // black-hole suction: particles spiral in, accelerating, and get devoured
+      const dir = Math.sign(p.spin) || 1
+      for (const q of p.parts) {
+        const t01 = Math.max(0, Math.min(1, 1 - q.rad / (p.r * 2.3)))
+        q.a += dir * dt * (0.8 + 3.4 * t01 * t01) * q.sp
+        q.rad -= dt * p.r * (0.35 + 2.6 * t01 * t01) * q.sp
+        if (q.rad < p.r * 0.4) {
+          q.a = Math.random() * Math.PI * 2
+          q.rad = rand(2.0, 2.3) * p.r
+          q.sp = rand(0.7, 1.3)
+        }
+      }
       if (p.life > 0) next.push(p)
     }
     sn.portals = next
@@ -2013,33 +2048,80 @@ export class Game {
       ctx.setLineDash([])
       ctx.restore()
     }
-    // portals
+    // portals — black holes: warped light streaks, accretion ring, event
+    // horizon, and particles spiraling into the void (one palette for all)
     for (let i = 0; i < sn.portals.length; i++) {
       const p = sn.portals[i]
       const isExit = p.role === 'out'
-      const pulse = isExit ? 1.25 : 1
+      const fade = Math.min(1, p.life / 0.4) * (p.role === 'decoy' ? 0.55 : 1)
+      if (fade <= 0) continue
+      const scale = (1 + p.flash * 0.45) * (isExit ? 1.22 : 1) * (0.9 + 0.1 * Math.sin(this.time * 5 + i))
+      const r = p.r * scale
+      const dir = Math.sign(p.spin) || 1
+      const rot = this.time * 1.6 * dir + i * 1.3
       ctx.save()
-      ctx.strokeStyle = p.color
-      ctx.fillStyle = p.color
-      ctx.shadowColor = p.color
-      ctx.shadowBlur = isExit ? 22 : 14
-      ctx.lineWidth = isExit ? 4 : 3
-      ctx.globalAlpha = Math.max(0.25, p.life / p.max) * (p.role === 'decoy' ? 0.4 : 0.9)
-      ctx.beginPath()
-      ctx.arc(p.x, p.y, p.r * pulse + Math.sin(this.time * 5 + i) * 2, 0, Math.PI * 2)
-      ctx.stroke()
+      // 1) gravity streaks — faint light bent around the void
+      ctx.strokeStyle = '#7aa2ff'
+      ctx.lineWidth = 1
+      for (let s = 0; s < 10; s++) {
+        const sa = rot * 0.5 + s * (Math.PI * 2 / 10)
+        const r0 = r * (1.55 + 0.5 * Math.sin(sa * 3 + this.time * 2))
+        ctx.globalAlpha = fade * (0.1 + 0.06 * Math.sin(this.time * 3 + s))
+        ctx.beginPath()
+        ctx.moveTo(p.x + Math.cos(sa) * r0, p.y + Math.sin(sa) * r0)
+        ctx.lineTo(p.x + Math.cos(sa + 0.16) * r * 0.9, p.y + Math.sin(sa + 0.16) * r * 0.9)
+        ctx.stroke()
+      }
+      // 2) accretion arcs — hot material whipping around the rim
+      ctx.shadowColor = '#8fb0ff'
+      ctx.shadowBlur = 12
+      ctx.lineCap = 'round'
+      for (let s = 0; s < 3; s++) {
+        const aa = rot + s * (Math.PI * 2 / 3)
+        ctx.strokeStyle = s === 0 ? '#cfe4ff' : s === 1 ? '#9db4ff' : '#8f7bff'
+        ctx.globalAlpha = fade * (0.85 - s * 0.18)
+        ctx.lineWidth = 2.6 - s * 0.6
+        ctx.beginPath()
+        ctx.arc(p.x, p.y, r * (0.68 + s * 0.09), aa, aa + 1.9)
+        ctx.stroke()
+      }
+      // 3) event horizon — the black hole
+      const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, r * 0.62)
+      g.addColorStop(0, '#000')
+      g.addColorStop(0.82, '#02040f')
+      g.addColorStop(1, '#0b1636')
+      ctx.globalAlpha = fade
+      ctx.fillStyle = g
+      ctx.beginPath(); ctx.arc(p.x, p.y, r * 0.62, 0, Math.PI * 2); ctx.fill()
+      // photon ring — thin white-hot rim
+      ctx.strokeStyle = '#eaf6ff'
+      ctx.shadowColor = '#9ecbff'
+      ctx.shadowBlur = 16
+      ctx.lineWidth = 1.6
+      ctx.beginPath(); ctx.arc(p.x, p.y, r * 0.64, 0, Math.PI * 2); ctx.stroke()
       ctx.shadowBlur = 0
-      ctx.lineWidth = 2
-      ctx.globalAlpha *= 0.6
-      const rot = this.time * (p.spin > 0 ? 2 : -2) + i * 1.3
-      ctx.beginPath(); ctx.arc(p.x, p.y, p.r * 0.6 * pulse, rot, rot + 2.1); ctx.stroke()
-      ctx.beginPath(); ctx.arc(p.x, p.y, p.r * 0.6 * pulse, rot + Math.PI, rot + Math.PI + 2.1); ctx.stroke()
-      ctx.globalAlpha *= 0.7
-      ctx.beginPath(); ctx.arc(p.x, p.y, 4, 0, Math.PI * 2); ctx.fill()
+      // 4) suction particles — streaks spiraling into the void
+      ctx.strokeStyle = '#dff1ff'
+      for (const q of p.parts) {
+        const t01 = Math.max(0, Math.min(1, 1.5 - q.rad / r))
+        const x = p.x + Math.cos(q.a) * q.rad
+        const y = p.y + Math.sin(q.a) * q.rad
+        // trail behind the motion (outward + back along the spiral)
+        const ta = q.a - 0.22 * dir
+        ctx.globalAlpha = fade * (0.12 + 0.65 * t01)
+        ctx.lineWidth = q.w
+        ctx.beginPath()
+        ctx.moveTo(x, y)
+        ctx.lineTo(p.x + Math.cos(ta) * (q.rad + r * 0.14), p.y + Math.sin(ta) * (q.rad + r * 0.14))
+        ctx.stroke()
+      }
+      // 5) exit marker — faint dashed halo (same palette)
       if (isExit) {
-        ctx.globalAlpha = 0.5
-        ctx.setLineDash([5, 7])
-        ctx.beginPath(); ctx.arc(p.x, p.y, p.r * pulse + 14, this.time * 2, this.time * 2 + Math.PI * 2); ctx.stroke()
+        ctx.strokeStyle = '#9db4ff'
+        ctx.globalAlpha = fade * 0.4
+        ctx.lineWidth = 1.5
+        ctx.setLineDash([4, 8])
+        ctx.beginPath(); ctx.arc(p.x, p.y, r + 10, this.time * 1.5, this.time * 1.5 + Math.PI * 2); ctx.stroke()
         ctx.setLineDash([])
       }
       ctx.restore()
