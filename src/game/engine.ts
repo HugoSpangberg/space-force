@@ -706,14 +706,12 @@ export class Game {
         }
         if (!hit && this.boss) {
           if (this.boss.snake) {
-            for (const s of this.boss.snake.segs) {
-              if (s.hidden) continue
-              if (dist(b, s) < s.r + b.r) {
-                this.boss.hp -= 3; hit = true
-                this.bossFlash = 1
-                this.burst(b.x, b.y, 3, '#fb7185')
-                break
-              }
+            // only the HEAD can be shot — the body is invulnerable
+            const head = this.boss.snake.segs[0]
+            if (head && !head.hidden && dist(b, head) < head.r + b.r) {
+              this.boss.hp -= 3; hit = true
+              this.bossFlash = 1
+              this.burst(b.x, b.y, 3, '#fb7185')
             }
           } else if (dist(b, this.boss) < this.boss.r + b.r) {
             this.boss.hp -= 3; hit = true
@@ -1256,7 +1254,7 @@ export class Game {
   private spawnBoss() {
     const kind: DesignId = this.course === 'nebula' ? 'boss-orochi' : 'boss-nemesis'
     // the serpent is a longer, tankier-style fight, but slightly less hp than the warden
-    const maxHp = kind === 'boss-orochi' ? 640 : BOSS_MAX
+    const maxHp = kind === 'boss-orochi' ? 360 : BOSS_MAX
     this.boss = { x: this.w / 2, y: -140, r: 84, hp: maxHp, maxHp, t: 0, pattern: 0, tele: 0, atk: 0, dying: false, deathT: 0, kind, portalT: 0, portalIndex: 0 }
     if (kind === 'boss-orochi') {
       const b = this.boss
