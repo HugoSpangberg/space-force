@@ -90,6 +90,9 @@ export interface GameDebugSnapshot {
     targetPath?: Array<{ x: number; y: number }>
     targetIdx?: number
     targetT?: number
+    transitPhase?: 'in' | 'void' | 'out'
+    transitT?: number
+    transitDir?: { x: number; y: number }
     attacks: {
       rings: Array<{ position: { x: number; y: number }; remaining: number; state: 'warning' | 'firing' }>
       lasers: Array<{ position: { x: number; y: number }; angle: number; remaining: number; state: 'warning' | 'charging' | 'firing' }>
@@ -162,8 +165,9 @@ interface BossSnake {
   dashIndex: number
   dashFrom: BossPortal | null
   dashTo: BossPortal | null
-  transitPhase: 'in' | 'void'
+  transitPhase: 'in' | 'void' | 'out'
   transitT: number
+  transitDir: { x: number; y: number }
   echoes: BossEcho[]
   sweep: BossSweep | null
   nova: BossNova | null
@@ -178,6 +182,8 @@ interface Boss {
 
 const SNAKE_SEGS = 46
 const SNAKE_SPEED = 175
+const SWALLOW_DUR = 0.75   // how long it takes the portal to consume / release the whole body
+const EMERGE_DUR = 0.75
 const PORTAL_COLORS = ['#22d3ee', '#f472b6', '#fbbf24', '#4ade80', '#a78bfa']
 const rand = (a: number, b: number) => a + Math.random() * (b - a)
 
@@ -365,12 +371,16 @@ export class Game {
             ...(snake ? {
               hidden: snake.segs[0]?.hidden ?? false,
               segmentCount: snake.segs.length,
+              visibleSegments: snake.segs.reduce((n, s) => n + (s.hidden ? 0 : 1), 0),
               bodyLength: snake.length,
               targetPortal: snake.targetPortal,
               targetPassages: snake.dashCount,
               remainingPassages: Math.max(0, snake.dashCount - snake.dashIndex),
               targetPath: snake.targetPath.map(p => ({ x: p.x, y: p.y })),
               targetIdx: snake.targetIdx,
+              transitPhase: snake.transitPhase,
+              transitT: snake.transitT,
+              transitDir: { x: snake.transitDir.x, y: snake.transitDir.y },
             } : {}),
             portalCount: portals.length,
             portals: portals.map(portal => ({
@@ -1264,7 +1274,7 @@ export class Game {
         moveTarget: null,
         vel: { x: 0, y: 0 },
         speed: SNAKE_SPEED, attackIndex: 0, dashCount: 3, dashIndex: 0,
-        dashFrom: null, dashTo: null, transitPhase: 'in', transitT: 0, echoes: [], sweep: null, nova: null, rings: [], lasers: [], novaDone: false,
+        dashFrom: null, dashTo: null, transitPhase: 'in', transitT: -1, transitDir: { x: 0, y: 1 }, echoes: [], sweep: null, nova: null, rings: [], lasers: [], novaDone: false,
         attackT: PHASE_INTRO, teleportT: rand(1.6, 2.4),
       }
     }
@@ -1493,50 +1503,81 @@ export class Game {
     } else if (sn.mode === 'transit') {
       const entry = sn.targetPath[0]
       const exit = sn.targetPath[1]
+      const bodyLen = sn.length
+      const penStep = (bodyLen / SWALLOW_DUR) * dt   // drive the head through the portal so the whole body is consumed in SWALLOW_DUR
       if (sn.transitPhase === 'in') {
-        // fly the visible serpent into the entry portal
-        const step = sn.speed * 1.7 * dt
-        const dx = entry.x - b.x, dy = entry.y - b.y
-        const len = Math.hypot(dx, dy) || 1
-        if (len <= step + 14) {
-          b.x = entry.x; b.y = entry.y
-          // absorbed — the serpent no longer exists between the portals
-          this.spawnShockwave(entry.x, entry.y, '#22d3ee')
-          this.burst(entry.x, entry.y, 10, '#a78bfa')
-          sn.trail = []
-          sn.tunnels = []
-          sn.dist = 0
-          sn.transitPhase = 'void'
-          // short blink — long enough to read as vanished, not a DPS hole
-          sn.transitT = b.pattern === 2 ? 0.18 : b.pattern === 1 ? 0.2 : 0.22
+        if (sn.transitT < 0) {
+          // approach: the visible serpent flies toward the entry portal
+          const step = sn.speed * 1.7 * dt
+          const dx = entry.x - b.x, dy = entry.y - b.y
+          const len = Math.hypot(dx, dy) || 1
+          sn.transitDir = { x: dx / len, y: dy / len }
+          if (len <= step + 12) {
+            // reached the mouth — begin being swallowed head-first
+            b.x = entry.x; b.y = entry.y
+            sn.transitT = 0
+            this.spawnShockwave(entry.x, entry.y, '#22d3ee')
+            this.burst(entry.x, entry.y, 8, '#a78bfa')
+          } else {
+            b.x += dx / len * step; b.y += dy / len * step
+            sn.dist += step
+            this.pushTrailNode(sn, b.x, b.y)
+          }
         } else {
-          b.x += dx / len * step; b.y += dy / len * step
-          sn.dist += step
+          // swallow: the head is driven through the portal; the body follows the
+          // trail and is consumed head-first (front segments hidden as they pass in)
+          sn.transitT += penStep
+          b.x += sn.transitDir.x * penStep
+          b.y += sn.transitDir.y * penStep
+          sn.dist += penStep
           this.pushTrailNode(sn, b.x, b.y)
+          if (sn.transitT >= bodyLen) {
+            // fully consumed — a short beat where it simply does not exist
+            sn.trail = []
+            sn.tunnels = []
+            sn.dist = 0
+            sn.transitPhase = 'void'
+            sn.transitT = 0.12
+            this.spawnShockwave(entry.x, entry.y, '#a78bfa')
+          }
         }
-      } else {
-        // void — not rendered, no collision, untargetable
+      } else if (sn.transitPhase === 'void') {
+        // not rendered, no collision, untargetable
         sn.transitT -= dt
         if (sn.transitT <= 0) {
+          // emerge: the head comes out of the exit portal first, then the body
           b.x = exit.x; b.y = exit.y
           sn.tunnels = []
-          // pre-seed the trail so the full body bursts out of the portal,
-          // trailing behind the outward direction (entry -> exit)
-          const dx = exit.x - entry.x, dy = exit.y - entry.y
-          const dl = Math.hypot(dx, dy) || 1
-          const ux = dx / dl, uy = dy / dl
           sn.trail = []
-          for (let i = 0; i <= SNAKE_SEGS; i++) {
-            const k = SNAKE_SEGS - i
-            sn.trail.push({ d: i * sn.spacing, x: exit.x - ux * k * sn.spacing, y: exit.y - uy * k * sn.spacing })
-          }
-          sn.dist = SNAKE_SEGS * sn.spacing
+          sn.dist = 0
+          this.pushTrailNode(sn, b.x, b.y)
+          sn.transitPhase = 'out'
+          sn.transitT = 0
           this.spawnShockwave(exit.x, exit.y, '#22d3ee')
           this.spawnShockwave(exit.x, exit.y, '#a78bfa')
           this.burst(exit.x, exit.y, 10, '#f472b6')
+        }
+      } else {
+        // emerge: the head flies out of the exit toward the open arena while the
+        // body is revealed head-first (front segments shown as they stream out
+        // over EMERGE_DUR). The tail bunches at the mouth until the boss flies
+        // off in free-flight and the body stretches back to full length.
+        const acx = this.w / 2, acy = (42 + this.h * 0.72) / 2
+        const dxc = acx - b.x, dyc = acy - b.y
+        const lc = Math.hypot(dxc, dyc)
+        const emStep = lc > 0.5 ? Math.min(lc, 620 * dt) : 0
+        if (emStep > 0) {
+          b.x += dxc / lc * emStep
+          b.y += dyc / lc * emStep
+          sn.dist += emStep
+          this.pushTrailNode(sn, b.x, b.y)
+        }
+        sn.transitT += dt
+        if (sn.transitT >= EMERGE_DUR) {
           sn.mode = 'attack'
           sn.modeT = 0
           sn.targetPortal = 1
+          sn.moveTarget = null
           this.afterTeleport(sn, b)
         }
       }
@@ -1557,13 +1598,26 @@ export class Game {
     this.updatePortals(sn, dt)
     // build body segments
     sn.prevSegs = sn.segs
+    const inSwallow = sn.mode === 'transit' && sn.transitPhase === 'in' && sn.transitT >= 0
+    const inEmerge = sn.mode === 'transit' && sn.transitPhase === 'out'
     const voided = sn.mode === 'transit' && sn.transitPhase === 'void'
-    const segs: BossSnakeSeg[] = [{ x: b.x, y: b.y, r: 26, hidden: voided, color: '#ffffff' }]
+    // how many front body-segments are already consumed (swallow, by distance)
+    // or revealed (emerge, by timer) — always head-first
+    let count = 0
+    if (inSwallow) count = Math.min(SNAKE_SEGS, Math.floor(sn.transitT / sn.spacing))
+    else if (inEmerge) count = Math.min(SNAKE_SEGS, Math.floor((sn.transitT / EMERGE_DUR) * SNAKE_SEGS))
+    // head is hidden once it is inside the portal (swallowing) or fully gone (void)
+    const headHidden = voided || inSwallow
+    const segs: BossSnakeSeg[] = [{ x: b.x, y: b.y, r: 26, hidden: headHidden, color: '#ffffff' }]
     for (let i = 1; i <= SNAKE_SEGS; i++) {
       const p = this.resolveSnakePoint(sn, sn.dist - i * sn.spacing)
       const taper = 1 - i / (SNAKE_SEGS + 4)
       const outside = p.x < -36 || p.x > this.w + 36 || p.y < -36 || p.y > this.h + 36
-      segs.push({ x: p.x, y: p.y, r: 7 + 15 * taper + Math.sin(b.t * 6 - i * 0.35) * 1.2, hidden: voided || p.hidden || outside, color: p.color })
+      let hidden = p.hidden || outside
+      if (voided) hidden = true
+      else if (inSwallow) hidden = hidden || i <= count     // front consumed first, tail still out
+      else if (inEmerge) hidden = hidden || i > count       // front revealed first, tail still in
+      segs.push({ x: p.x, y: p.y, r: 7 + 15 * taper + Math.sin(b.t * 6 - i * 0.35) * 1.2, hidden, color: p.color })
     }
     sn.segs = segs
     // body-vs-ship collision (swept on the moving segments)
@@ -1647,10 +1701,12 @@ export class Game {
   }
 
   private beginTransit(sn: BossSnake) {
-    // the serpent now flies the visible body INTO the entry portal, ceases to
-    // exist in the void, and re-emerges at the exit portal (no fast dash)
+    // the serpent flies the visible body into the entry portal, is swallowed
+    // head-first (each part vanishing as it reaches the mouth), blinks out of
+    // existence in the void, then re-emerges at the exit portal head-first.
     sn.transitPhase = 'in'
-    sn.transitT = 0
+    sn.transitT = -1           // <0 => still approaching the entry portal
+    sn.transitDir = { x: 0, y: 1 }
     sn.dashFrom = null
     sn.dashTo = null
     sn.mode = 'transit'

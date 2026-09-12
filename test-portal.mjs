@@ -1,13 +1,16 @@
 // Verifies the Serpent portal transfer with a per-frame in-page recorder:
-//   1. 'transit/in'   — boss VISIBLE, flying toward the ENTRY portal (dist decreases)
-//   2. 'transit/void' — boss HIDDEN, position FROZEN (it does not exist)
-//   3. 'attack'       — boss re-emerges AT the exit portal
+//   1. transit 'in' (approach)  — head VISIBLE, flying toward the ENTRY portal
+//   2. transit 'in' (swallow)   — head hidden, body CONSUMED head-first
+//                                  (visible-segment count decreases to 0)
+//   3. transit 'void'           — nothing visible, position FROZEN
+//   4. transit 'out' (emerge)   — head VISIBLE at the EXIT, body REVEALED
+//                                  head-first (visible-segment count grows to full)
 import { chromium } from 'playwright'
 
 const URL = process.env.URL || 'http://localhost:4177/'
 const W = parseInt(process.env.WIDTH || '390')
 const H = parseInt(process.env.HEIGHT || '844')
-const DURATION = parseInt(process.env.DURATION || '30')
+const DURATION = parseInt(process.env.DURATION || '34')
 
 const browser = await chromium.launch()
 const page = await browser.newPage({ viewport: { width: W, height: H } })
@@ -40,7 +43,10 @@ await page.evaluate(() => {
       const b = g.boss
       window.__portalLog.push({
         t: performance.now() / 1000,
-        mode: sn.mode, ph: sn.transitPhase, hidden: !!sn.segs[0]?.hidden,
+        mode: sn.mode, ph: sn.transitPhase, tt: sn.transitT,
+        headHidden: !!sn.segs[0]?.hidden,
+        vis: sn.segs.reduce((n, s) => n + (s.hidden ? 0 : 1), 0),
+        total: sn.segs.length,
         x: b.x, y: b.y, pat: b.pattern,
         ex: sn.targetPath[0]?.x ?? null, ey: sn.targetPath[0]?.y ?? null,
         qx: sn.targetPath[1]?.x ?? null, qy: sn.targetPath[1]?.y ?? null,
@@ -53,86 +59,100 @@ await page.evaluate(() => {
 })
 
 // screenshots at each sub-phase (checked each poll)
-let shotIn = false, shotVoid = false, shotOut = false
+let shotSwallow = false, shotVoid = false, shotEmerge = false
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 await sleep(DURATION * 1000)
 while (true) {
   const phase = await page.evaluate(() => {
     const g = window.__game
     const sn = g?.boss?.snake
-    return sn ? { mode: sn.mode, ph: sn.transitPhase } : null
+    return sn ? { mode: sn.mode, ph: sn.transitPhase, tt: sn.transitT } : null
   }).catch(() => null)
   if (!phase) break
-  if (phase.mode === 'transit' && phase.ph === 'in' && !shotIn) { await page.screenshot({ path: '/tmp/portal-in.png' }); shotIn = true }
+  if (phase.mode === 'transit' && phase.ph === 'in' && phase.tt >= 0 && !shotSwallow) { await page.screenshot({ path: '/tmp/portal-swallow.png' }); shotSwallow = true }
   if (phase.mode === 'transit' && phase.ph === 'void' && !shotVoid) { await page.screenshot({ path: '/tmp/portal-void.png' }); shotVoid = true }
-  if (phase.mode === 'attack' && !shotOut) { await page.screenshot({ path: '/tmp/portal-out.png' }); shotOut = true }
-  if (shotIn && shotVoid && shotOut) break
-  await sleep(100)
+  if (phase.mode === 'transit' && phase.ph === 'out' && !shotEmerge) { await page.screenshot({ path: '/tmp/portal-emerge.png' }); shotEmerge = true }
+  if (shotSwallow && shotVoid && shotEmerge) break
+  await sleep(80)
 }
 
 const log = await page.evaluate(() => window.__portalLog)
 await browser.close()
 
-// ---------- analyze ----------
-// group into cycles: a cycle = transit(in frames) + transit(void frames) + first attack frame
+// ---------- group into cycles ----------
 const cycles = []
 let cur = null
 for (const s of log) {
   if (s.mode === 'transit') {
-    if (!cur) cur = { in: [], vo: [], emerge: null }
-    ;(s.ph === 'void' ? cur.vo : cur.in).push(s)
-    if (cur.in.length && !shotIn && s.ph === 'in') {} // noop
-  } else if (s.mode === 'attack' && cur) {
-    cur.emerge = s
+    if (!cur) cur = { appr: [], sw: [], vo: [], out: [], after: null }
+    if (s.ph === 'in' && s.tt < 0) cur.appr.push(s)
+    else if (s.ph === 'in') cur.sw.push(s)
+    else if (s.ph === 'void') cur.vo.push(s)
+    else if (s.ph === 'out') cur.out.push(s)
+  } else if (cur) {
+    cur.after = s
     cycles.push(cur)
-    cur = null
-  } else if (s.mode !== 'transit' && s.mode !== 'attack') {
-    if (cur && cur.in.length + cur.vo.length > 0 && !cur.emerge) cycles.push(cur) // aborted cycle (phase change)
     cur = null
   }
 }
-if (cur && cur.in.length + cur.vo.length > 0) cycles.push(cur)
+if (cur) cycles.push(cur)
 
 let pass = true
-const complete = cycles.filter(c => c.in.length > 0 && c.vo.length > 0 && c.emerge)
+const fail = (msg) => { console.log('FAIL: ' + msg); pass = false }
+const complete = cycles.filter(c => c.appr.length > 0 && c.sw.length > 0 && c.vo.length > 0 && c.out.length > 0)
 console.log(`frames: ${log.length}, cycles: ${cycles.length}, complete: ${complete.length}`)
-const speeds = []
-for (const c of complete) {
-  const f = c.in[0], l = c.in[c.in.length - 1]
-  const d0 = Math.hypot(f.x - f.ex, f.y - f.ey)
-  const d1 = Math.hypot(l.x - f.ex, l.y - f.ey)
-  // 1) fly-in visible + distance to ENTRY strictly decreasing
-  let mono = true
-  for (let i = 1; i < c.in.length; i++) {
-    const a = Math.hypot(c.in[i - 1].x - f.ex, c.in[i - 1].y - f.ey)
-    const b2 = Math.hypot(c.in[i].x - f.ex, c.in[i].y - f.ey)
-    if (b2 > a + 2) mono = false
-  }
-  for (const s of c.in) if (s.hidden) { console.log('FAIL: visible boss hidden during fly-in'); pass = false }
-  const dur = (c.vo[0].t - f.t) || 1 / 60
-  const sp = (d0 - d1) / dur
-  speeds.push(sp)
-  if (d1 > 30) { console.log(`FAIL: fly-in stopped ${d1.toFixed(0)}px short of entry`); pass = false }
-  if (!mono) { console.log('FAIL: fly-in not monotonic toward entry'); pass = false }
 
-  // 2) void: hidden, frozen
+const full = log.length ? Math.max(...log.map(s => s.total)) : 0
+for (const c of complete) {
+  const f = c.appr[0]
+  // 1) approach: head visible + monotonic toward entry
+  let mono = true
+  for (let i = 1; i < c.appr.length; i++) {
+    const a = Math.hypot(c.appr[i - 1].x - f.ex, c.appr[i - 1].y - f.ey)
+    const b = Math.hypot(c.appr[i].x - f.ex, c.appr[i].y - f.ey)
+    if (b > a + 2) mono = false
+  }
+  for (const s of c.appr) if (s.headHidden) fail('head hidden during approach (fly-in)')
+  const aEnd = c.appr[c.appr.length - 1]
+  if (Math.hypot(aEnd.x - f.ex, aEnd.y - f.ey) > 40) fail(`approach stopped ${Math.hypot(aEnd.x - f.ex, aEnd.y - f.ey).toFixed(0)}px short of entry`)
+  if (!mono) fail('approach not monotonic toward entry')
+
+  // 2) swallow: head hidden, visible count NON-INCREASING, ends at 0
+  for (const s of c.sw) if (!s.headHidden) fail('head visible during swallow')
+  let swMono = true
+  for (let i = 1; i < c.sw.length; i++) if (c.sw[i].vis > c.sw[i - 1].vis + 1) swMono = false
+  if (!swMono) fail('swallow: visible segments did not decrease head-first')
+  if (c.sw[c.sw.length - 1].vis > 3) fail(`swallow did not finish: ${c.sw[c.sw.length - 1].vis} segments still visible`)
+
+  // 3) void: nothing visible + frozen
   const v0 = c.vo[0]
   let maxMove = 0
   for (const v of c.vo) {
-    if (!v.hidden) { console.log('FAIL: boss visible during void'); pass = false }
+    if (v.vis !== 0) fail('something visible during void')
     maxMove = Math.max(maxMove, Math.hypot(v.x - v0.x, v.y - v0.y))
   }
-  if (maxMove > 0.5) { console.log(`FAIL: boss moved ${maxMove.toFixed(1)}px during void`); pass = false }
-  const voidDur = (c.vo[c.vo.length - 1].t - v0.t) + 1 / 60
-  console.log(`  P${c.in[0].pat}: fly-in ${d0.toFixed(0)}px @ ${sp.toFixed(0)}px/s, void ${voidDur.toFixed(2)}s frozen, frames in/void=${c.in.length}/${c.vo.length}`)
+  if (maxMove > 0.5) fail(`boss moved ${maxMove.toFixed(1)}px during void`)
 
-  // 3) emerge at exit
-  const e = c.emerge
-  const eErr = Math.hypot(e.x - f.qx, e.y - f.qy)
-  if (eErr > 8) { console.log(`FAIL: emerged ${eErr.toFixed(1)}px from exit`); pass = false }
+  // 4) emerge: head visible, visible count NON-DECREASING, starts near exit
+  for (const s of c.out) if (s.headHidden) fail('head hidden during emerge')
+  let emMono = true
+  for (let i = 1; i < c.out.length; i++) if (c.out[i].vis < c.out[i - 1].vis - 1) emMono = false
+  if (!emMono) fail('emerge: visible segments did not grow head-first')
+  if (c.out[0].vis > 3) fail(`emerge started with ${c.out[0].vis} segments visible (should be ~head only)`)
+  const oStart = c.out[0]
+  const eErr = Math.hypot(oStart.x - f.qx, oStart.y - f.qy)
+  if (eErr > 40) fail(`emerge started ${eErr.toFixed(0)}px from exit`)
+  if (c.out[c.out.length - 1].vis < full - 2) fail(`emerge did not finish: only ${c.out[c.out.length - 1].vis}/${full} segments visible`)
+  if (c.out[c.out.length - 1].vis > c.out[0].vis + 10) console.log('  note: emerge revealed', c.out[0].vis, '->', c.out[c.out.length - 1].vis)
+
+  const swDur = (c.sw[c.sw.length - 1].t - (c.sw[0].t - 1 / 60))
+  const emDur = (c.out[c.out.length - 1].t - (c.out[0].t - 1 / 60))
+  console.log(`  P${f.pat}: appr ${c.appr.length}f, swallow ${c.sw.length}f/${swDur.toFixed(2)}s (${full}->0), void ${c.vo.length}f, emerge ${c.out.length}f/${emDur.toFixed(2)}s (1->${full})`)
 }
-if (complete.length === 0) { console.log('FAIL: no complete cycle'); pass = false }
-if (speeds.length) console.log(`fly-in speeds: min ${Math.min(...speeds).toFixed(0)} / avg ${(speeds.reduce((a, b) => a + b, 0) / speeds.length).toFixed(0)} / max ${Math.max(...speeds).toFixed(0)} px/s`)
+
+if (complete.length === 0) fail('no complete cycle')
 console.log('page errors:', errors.length ? errors : 'none')
-console.log(pass && errors.length === 0 ? 'PASS: portal transfer = fly-in -> void (frozen) -> emerge at exit' : 'FAIL')
+console.log(pass && errors.length === 0
+  ? 'PASS: gradual portal transfer = fly-in -> swallow head-first -> void -> emerge head-first'
+  : 'FAIL')
 process.exit(pass && errors.length === 0 ? 0 : 1)
