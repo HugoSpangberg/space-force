@@ -1256,7 +1256,7 @@ export class Game {
   private spawnBoss() {
     const kind: DesignId = this.course === 'nebula' ? 'boss-orochi' : 'boss-nemesis'
     // the serpent is a longer, tankier-style fight, but slightly less hp than the warden
-    const maxHp = kind === 'boss-orochi' ? 360 : BOSS_MAX
+    const maxHp = kind === 'boss-orochi' ? 640 : BOSS_MAX
     this.boss = { x: this.w / 2, y: -140, r: 84, hp: maxHp, maxHp, t: 0, pattern: 0, tele: 0, atk: 0, dying: false, deathT: 0, kind, portalT: 0, portalIndex: 0 }
     if (kind === 'boss-orochi') {
       const b = this.boss
@@ -1468,7 +1468,7 @@ export class Game {
     const active = this.phaseStage === 'active'
     sn.modeT += dt
     // ambient drifting during idle/recover
-    const arenaL = 30, arenaR = this.w - 30, arenaT = 42, arenaB = this.h * 0.72
+    const arenaL = 30, arenaR = this.w - 30, arenaT = 42, arenaB = this.h * 0.84   // dips into the player's own zone
     const moving = sn.mode === 'idle' || sn.mode === 'recover' || sn.mode === 'ring' || sn.mode === 'attack'
     if (moving) {
       // free-flight: glide in a direction, bounce off the arena edges/corners
@@ -1478,11 +1478,20 @@ export class Game {
         sn.dist += 24
         this.pushTrailNode(sn, b.x, b.y)
       } else {
-        const sp = sn.speed * (b.pattern === 2 ? 1.3 : b.pattern === 1 ? 1.05 : 0.85)
-        // re-aim toward a fresh random point once we reach the current one
+        const sp = sn.speed * (b.pattern === 2 ? 1.5 : b.pattern === 1 ? 1.25 : 1.0)
+        // re-aim: mostly hunt past the ship (the body IS the threat — it sweeps
+        // through the player's zone), sometimes roam to stay unpredictable
         let tgt = sn.moveTarget
         if (!tgt || Math.hypot(tgt.x - b.x, tgt.y - b.y) < 24) {
-          tgt = sn.moveTarget = this.pickFlyTarget(b, arenaL, arenaR, arenaT, arenaB)
+          const hunting = Math.random() < (b.pattern === 2 ? 0.75 : b.pattern === 1 ? 0.6 : 0.4)
+          if (hunting) {
+            tgt = sn.moveTarget = {
+              x: Math.max(arenaL + 12, Math.min(arenaR - 12, this.ship.x + rand(-90, 90))),
+              y: Math.max(arenaT + 12, Math.min(arenaB - 12, this.ship.y + rand(-70, 70))),
+            }
+          } else {
+            tgt = sn.moveTarget = this.pickFlyTarget(b, arenaL, arenaR, arenaT, arenaB)
+          }
         }
         const dx = tgt.x - b.x, dy = tgt.y - b.y
         const len = Math.hypot(dx, dy) || 1
@@ -1518,14 +1527,14 @@ export class Game {
       }
     }
     if (sn.mode === 'telegraph') {
-      if (sn.modeT >= 0.5 && sn.targetPath.length === 0) {
+      if (sn.modeT >= 0.3 && sn.targetPath.length === 0) {
         const pts = this.buildTeleportPath(b)
         sn.targetPath = pts
         sn.targetIdx = 0
         sn.targetPortal = 0
         this.openPortals(sn, pts, b, b.pattern)
       }
-      if (sn.modeT >= 0.7 && sn.targetPath.length > 0) this.beginTransit(sn)
+      if (sn.modeT >= 0.5 && sn.targetPath.length > 0) this.beginTransit(sn)
     } else if (sn.mode === 'transit') {
       const entry = sn.targetPath[0]
       const exit = sn.targetPath[1]
@@ -1587,16 +1596,23 @@ export class Game {
           this.spawnShockwave(exit.x, exit.y, '#22d3ee')
           this.spawnShockwave(exit.x, exit.y, '#a78bfa')
           this.burst(exit.x, exit.y, 10, '#f472b6')
+          // arrival burst: the re-emergence itself is an attack — a radial ring
+          // of bullets forces the player out of the landing zone
+          if (active) {
+            for (let i = 0; i < 12; i++) {
+              const a = (i / 12) * Math.PI * 2
+              this.bullets.push({ x: exit.x, y: exit.y, vx: Math.cos(a) * 175, vy: Math.sin(a) * 175, r: 5, friendly: false })
+            }
+          }
         }
       } else {
-        // emerge: the head flies out of the exit toward the open arena while the
-        // body is revealed head-first (front segments shown as they stream out
-        // over EMERGE_DUR). The tail bunches at the mouth until the boss flies
-        // off in free-flight and the body stretches back to full length.
-        const acx = this.w / 2, acy = (42 + this.h * 0.72) / 2
-        const dxc = acx - b.x, dyc = acy - b.y
+        // emerge: the head comes out and immediately DIVES at the player while
+        // the body is revealed head-first (front segments shown as they stream
+        // out over EMERGE_DUR). The tail bunches at the mouth until the boss
+        // flies off in free-flight and the body stretches back to full length.
+        const dxc = this.ship.x - b.x, dyc = this.ship.y - b.y
         const lc = Math.hypot(dxc, dyc)
-        const emStep = lc > 0.5 ? Math.min(lc, 620 * dt) : 0
+        const emStep = lc > 110 ? Math.min(lc - 85, 780 * dt) : 0   // stops ~85px short — a point-blank fan would be unfair
         if (emStep > 0) {
           b.x += dxc / lc * emStep
           b.y += dyc / lc * emStep
@@ -1679,13 +1695,24 @@ export class Game {
     return { x: l + m, y: t + m }
   }
 
-  /** Pick a safe, distant teleport destination, biased to the far side of the arena. */
-  private pickTeleportPoint(b: { x: number; y: number }): { x: number; y: number } {
-    const l = 34, r = this.w - 34, t = 46, bt = this.h * 0.7
+  /** Pick a safe teleport destination, biased to the far side of the arena. */
+  private pickTeleportPoint(b: { x: number; y: number }, nearShip = false): { x: number; y: number } {
+    // portals may sit low (0.82) so the EXIT can land within striking distance
+    // of the player — the re-emergence then dives at them
+    const l = 34, r = this.w - 34, t = 46, bt = this.h * 0.82
     const biasFar = Math.random() < 0.75 // most of the time, jump across the screen
     for (let i = 0; i < 14; i++) {
       let x: number, y: number
-      if (biasFar) {
+      if (nearShip && Math.random() < 0.7) {
+        // land within striking distance of the player — the re-emergence then
+        // dives at them, so the teleport itself is an attack (the >=170px ship
+        // margin below keeps it dodgeable)
+        const a = Math.random() * Math.PI * 2
+        const d = rand(180, 340)
+        x = this.ship.x + Math.cos(a) * d
+        y = this.ship.y + Math.sin(a) * d
+        if (x < l || x > r || y < t || y > bt) continue
+      } else if (biasFar) {
         const farLeft = b.x > this.w / 2
         x = farLeft ? rand(l, this.w * 0.42) : rand(this.w * 0.58, r)
         y = rand(t, bt)
@@ -1705,9 +1732,10 @@ export class Game {
   }
 
   private buildTeleportPath(b: Boss): Array<{ x: number; y: number }> {
-    // [entry, exit] — the exit is where the boss lands and attacks.
+    // [entry, exit] — the exit is where the boss lands and attacks. The exit is
+    // biased toward the player so the re-emergence is a dive at them.
     const entry = this.pickTeleportPoint(b)
-    const out = this.pickTeleportPoint(entry)
+    const out = this.pickTeleportPoint(entry, true)
     return [entry, out]
   }
 
@@ -1776,22 +1804,32 @@ export class Game {
         }
       }
       this.ringAttack(sn, b, 7, 150, 0.45)
+      // half the time, also a sweeping laser (introduces the threat early)
+      if (Math.random() < 0.5) this.snakeLaser(sn, b)
     } else {
-      // unstable: dense spiral + double ring + a homing laser
+      // unstable: dense spiral + double ring + a sweeping laser
       for (let i = 0; i < 12; i++) {
         const a = sn.attackIndex * 0.5 + i * (Math.PI * 2 / 12)
         this.bullets.push({ x: b.x, y: b.y, vx: Math.cos(a) * 180, vy: Math.sin(a) * 180, r: 5, friendly: false })
       }
       this.ringAttack(sn, b, 8, 165, 0.5)
-      const la = Math.atan2(this.ship.y - b.y, this.ship.x - b.x)
-      sn.lasers.push({ x: b.x, y: b.y, angle: la, t: 0, warn: 0.7, grow: 0.35, fire: 0.5, width: 6, len: Math.hypot(this.w, this.h), spin: 0 })
+      this.snakeLaser(sn, b)
     }
     if (p >= 1) this.spawnShockwave(b.x, b.y, '#f472b6')
   }
 
+  /** A homing laser that SPINS — the beam sweeps across the player's bearing
+   * during the firing window, so standing still gets you caught. */
+  private snakeLaser(sn: BossSnake, b: Boss) {
+    const la = Math.atan2(this.ship.y - b.y, this.ship.x - b.x)
+    const spin = (Math.random() < 0.5 ? -1 : 1) * rand(0.9, 1.3)
+    // angle(t) = a0 + spin*t; aim the crossing (t = warn+grow+fire/2) at the ship
+    sn.lasers.push({ x: b.x, y: b.y, angle: la - spin * (0.7 + 0.35 + 0.25), t: 0, warn: 0.7, grow: 0.35, fire: 0.5, width: 6, len: Math.hypot(this.w, this.h), spin })
+  }
+
   private endAttack(sn: BossSnake, b: Boss) {
     // after an attack, either chain another teleport or take a breather
-    const chain = b.pattern >= 1 && Math.random() < (b.pattern === 1 ? 0.5 : 0.65)
+    const chain = b.pattern >= 1 && Math.random() < (b.pattern === 1 ? 0.6 : 0.75)
     if (chain && sn.dashIndex < sn.dashCount) {
       sn.mode = 'telegraph'
       sn.modeT = 0
@@ -1806,8 +1844,8 @@ export class Game {
       sn.dashCount = b.pattern + 3
       sn.echoes.length = 0
       sn.portals.length = 0
-      // brief breather, then straight back to a new teleport
-      sn.teleportT = b.pattern === 2 ? rand(0.9, 1.3) : b.pattern === 1 ? rand(1.1, 1.6) : rand(1.4, 2.0)
+      // short breather, then straight back to a new teleport
+      sn.teleportT = b.pattern === 2 ? rand(0.5, 0.8) : b.pattern === 1 ? rand(0.7, 1.0) : rand(1.0, 1.4)
     }
   }
 
@@ -1913,7 +1951,7 @@ export class Game {
     for (const l of sn.lasers) {
       l.t += dt
       if (l.spin !== 0) l.angle += l.spin * dt
-      if (l.t < l.warn) continue
+      if (l.t < l.warn) { next.push(l); continue }   // alive during the telegraph too
       if (l.t >= l.warn + l.grow) {
         // firing window
         if (active) {

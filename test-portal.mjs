@@ -40,9 +40,9 @@ await page.evaluate(() => {
     const g = window.__game
     const sn = g?.boss?.snake
     // the idle ship still auto-fires, so over a 34s run it would kill the
-    // 360hp head-only boss mid-cycle — pin HP in the 242-245 band, safely
-    // above the P0->P1 boundary (237.6), so no phase transition can fire
-    if (g?.boss && !g.boss.dying && g.boss.hp < 244) g.boss.hp = 245
+    // 640hp head-only boss mid-cycle — pin HP in the 447-450 band, safely
+    // above the P0->P1 boundary (422.4), so no phase transition can fire
+    if (g?.boss && !g.boss.dying && g.boss.hp < 448) g.boss.hp = 450
     if (sn) {
       const b = g.boss
       window.__portalLog.push({
