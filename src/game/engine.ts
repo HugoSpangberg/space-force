@@ -60,7 +60,7 @@ export interface GameDebugSnapshot {
   }
   laserGates: {
     count: number
-    items: Array<{ orientation: LaserGate['orientation']; position: number; gap: number; gapSize: number; warningRemaining: number; activeRemaining: number; alpha: number }>
+    items: Array<{ orientation: LaserGate['orientation']; position: number; gap: number; gapSize: number; speed: number; warningRemaining: number; alpha: number }>
   }
   meteors: {
     count: number
@@ -105,9 +105,9 @@ export interface GameDebugSnapshot {
 interface Star { x: number; y: number; r: number; s: number }
 interface Bullet { x: number; y: number; vx: number; vy: number; r: number; friendly: boolean }
 interface Asteroid { x: number; y: number; vx: number; vy: number; r: number; hp: number; spin: number; rot: number; verts: number[]; kind: 'cratered' | 'fractured' | 'nebula'; alpha?: number }
-interface Drone { x: number; y: number; vx: number; vy: number; r: number; t: number; hp: number; kind: DesignId; laserAngle?: number; laserT?: number; laserHit?: boolean; spinSpeed?: number; alpha?: number; enterX?: number; enterY?: number; exitVX?: number; exitVY?: number; orbit?: { cx: number; cy: number; r: number; speed: number; phase: number }; sentinelSlot?: number; lockedAngle?: number; lockedX?: number; lockedY?: number; warning?: number; heading?: number }
+interface Drone { x: number; y: number; vx: number; vy: number; r: number; t: number; hp: number; kind: DesignId; laserAngle?: number; laserT?: number; laserHit?: boolean; spinSpeed?: number; alpha?: number; enterX?: number; enterY?: number; exitVX?: number; exitVY?: number; orbit?: { cx: number; cy: number; r: number; speed: number; phase: number }; sentinelSlot?: number; lockedAngle?: number; lockedX?: number; lockedY?: number; warning?: number; heading?: number; turretCorner?: { x: number; y: number }; nextFire?: number }
 interface LaserBar { y: number; vy: number; gapX: number; gapW: number; cycle: number; phase: number; alpha?: number }
-interface LaserGate { orientation: 'horizontal' | 'vertical'; pos: number; gap: number; gapSize: number; warning: number; active: number; alpha: number }
+interface LaserGate { orientation: 'horizontal' | 'vertical'; pos: number; gap: number; gapSize: number; speed: number; warning: number; alpha: number }
 interface MeteorWave { t: number; kind: 'diagonal' | 'horizontal'; gap: number; spawned: boolean }
 interface Retiring { type: 'bar' | 'drone'; bar?: LaserBar; drone?: Drone; alpha: number }
 interface Particle { x: number; y: number; vx: number; vy: number; life: number; max: number; r: number; color: string }
@@ -218,6 +218,8 @@ export class Game {
   private laserGates: LaserGate[] = []
   private meteorWaves: MeteorWave[] = []
   private laserGatePattern = 0
+  private lastGateLane: number | null = null
+  private turretCornerIndex = 0
   private meteorSpawnT = 0
   private meteorWaveIndex = 0
   private laserSpawnT = 0
@@ -421,11 +423,14 @@ export class Game {
         items: this.drones.map(drone => {
           const behavior = drone.kind === 'mob-kamikaze' ? 'kamikaze'
             : drone.orbit ? 'sentinel'
-              : drone.kind === 'mob-laser' ? 'laser' : 'scout'
+              : drone.turretCorner ? 'turret'
+                : drone.kind === 'mob-laser' ? 'laser' : 'scout'
           const visible = (drone.alpha ?? 1) > 0.5
           const sentinel = drone.orbit ? this.sentinelTiming(drone) : null
+          const turret = drone.turretCorner ? this.turretTiming(drone) : null
           const attacking = behavior === 'sentinel' ? (sentinel?.firing ?? false)
-            : behavior === 'laser' ? (drone.laserT ?? Infinity) < 0.6 && active
+            : behavior === 'turret' ? (turret?.firing ?? false)
+              : behavior === 'laser' ? (drone.laserT ?? Infinity) < 0.6 && active
               : behavior === 'kamikaze' ? (drone.warning ?? 0) <= 0 && active
                 : active
           return {
@@ -476,8 +481,8 @@ export class Game {
           position: gate.pos,
           gap: gate.gap,
           gapSize: gate.gapSize,
+          speed: gate.speed,
           warningRemaining: gate.warning,
-          activeRemaining: gate.active,
           alpha: gate.alpha,
         })),
       },
@@ -598,6 +603,8 @@ export class Game {
       this.spawnT = 0
       this.laserSpawnT = 0
       this.laserGatePattern = 0
+      this.lastGateLane = null
+      this.turretCornerIndex = 0
       this.meteorSpawnT = 0
       this.meteorWaveIndex = 0
       this.phaseT = 0
@@ -614,7 +621,7 @@ export class Game {
     else if (this.course === 'nebula' && this.phaseIdx === 4) this.updateMeteorSlalom(dt)
     else if (this.asteroids.length > 0) this.updateAsteroidsNoSpawn(dt)
     if ((this.course === 'graveyard' && this.phaseIdx >= 1 && this.phaseIdx <= 2) ||
-      (this.course === 'nebula' && (this.phaseIdx === 1 || this.phaseIdx === 2))) this.updateDrones(dt)
+      (this.course === 'nebula' && (this.phaseIdx === 1 || this.phaseIdx === 2 || this.phaseIdx === 3))) this.updateDrones(dt)
     else if (this.drones.length > 0) this.updateDronesNoSpawn(dt)
     if (this.course === 'nebula' && this.phaseIdx === 0) this.updateLaserBars(dt)
     if (this.course === 'nebula' && this.phaseIdx === 3) this.updateLaserGates(dt)
@@ -972,45 +979,117 @@ export class Game {
   }
 
   private spawnLaserGate() {
-    const horizontal = this.laserGatePattern % 2 === 0
-    const lanes = [0.25, 0.72, 0.42, 0.78, 0.3]
-    const lane = lanes[this.laserGatePattern % lanes.length]
+    const horizontal = Math.random() < 0.72
+    const span = horizontal ? this.w : this.h
+    // lanes chosen so consecutive walls force the player to weave across the arena
+    const lanes = [0.16, 0.36, 0.55, 0.74, 0.9]
+    let lane = lanes[Math.floor(Math.random() * lanes.length)]
+    if (this.lastGateLane !== null) {
+      const options = lanes.filter(l => Math.abs(l - this.lastGateLane!) >= 0.14)
+      if (options.length > 0) lane = options[Math.floor(Math.random() * options.length)]
+    }
+    const fromLeft = Math.random() < 0.5
     this.laserGatePattern++
     this.laserGates.push({
       orientation: horizontal ? 'horizontal' : 'vertical',
-      pos: horizontal ? this.h * (this.laserGatePattern % 3 === 0 ? 0.38 : 0.58) : this.w * (this.laserGatePattern % 3 === 0 ? 0.68 : 0.42),
-      gap: lane * (horizontal ? this.w : this.h),
-      gapSize: Math.max(118, (horizontal ? this.w : this.h) * 0.24),
-      warning: 1.2,
-      active: 1.65,
+      // walls enter off-screen and travel across the arena, following the track top to bottom
+      pos: horizontal ? -34 : (fromLeft ? -34 : this.w + 34),
+      gap: lane * span,
+      gapSize: Math.max(124, span * 0.24),
+      speed: horizontal ? rand(95, 125) : (fromLeft ? rand(85, 110) : -rand(85, 110)),
+      warning: 1.4,
       alpha: 0,
     })
+    this.lastGateLane = horizontal ? lane : null
   }
 
   private updateLaserGates(dt: number) {
     this.laserSpawnT -= dt
     if (this.phaseStage === 'active' && this.laserSpawnT <= 0) {
-      this.laserSpawnT = 3.35
+      this.laserSpawnT = 2.5
       this.spawnLaserGate()
     }
     const next: LaserGate[] = []
     for (const gate of this.laserGates) {
-      gate.alpha = Math.min(1, gate.alpha + dt * 3)
+      gate.pos += gate.speed * dt
       if (gate.warning > 0) gate.warning = Math.max(0, gate.warning - dt)
-      else gate.active -= dt
-      if (this.phaseStage === 'exit') gate.active = Math.min(gate.active, 0)
-      if (gate.active <= 0) gate.alpha -= dt * 2.5
-      if (gate.alpha <= 0) continue
-      if (gate.warning <= 0 && gate.active > 0 && this.phaseStage === 'active') {
+      // on phase exit the walls power down instead of freezing
+      if (this.phaseStage === 'exit') gate.alpha = Math.max(0, gate.alpha - dt * 3)
+      else gate.alpha = Math.min(1, gate.alpha + dt * 3)
+      const off = gate.orientation === 'horizontal'
+        ? gate.pos > this.h + 34
+        : gate.speed > 0 ? gate.pos > this.w + 34 : gate.pos < -34
+      if (gate.alpha <= 0 || off) continue
+      if (gate.warning <= 0 && this.phaseStage === 'active') {
         const axis = gate.orientation === 'horizontal' ? this.ship.x : this.ship.y
         const across = gate.orientation === 'horizontal' ? this.ship.y : this.ship.x
-        const inBand = Math.abs(across - gate.pos) < this.ship.r + 5
+        const inBand = Math.abs(across - gate.pos) < this.ship.r + 6
         const inGap = Math.abs(axis - gate.gap) < gate.gapSize / 2 - this.ship.r * 0.35
         if (inBand && !inGap && this.ship.inv <= 0 && this.pShield <= 0) this.damageShip()
       }
       next.push(gate)
     }
     this.laserGates = next
+  }
+
+  private spawnCornerTurret() {
+    const corners = [
+      { ax: 48, ay: 66, sx: -34, sy: -34 },
+      { ax: this.w - 48, ay: 66, sx: this.w + 34, sy: -34 },
+      { ax: 48, ay: this.h - 84, sx: -34, sy: this.h + 34 },
+      { ax: this.w - 48, ay: this.h - 84, sx: this.w + 34, sy: this.h + 34 },
+    ]
+    for (let i = 0; i < 4; i++) {
+      const c = corners[(this.turretCornerIndex + i) % 4]
+      // never park a turret right on top of where the player is flying
+      if (Math.hypot(c.ax - this.ship.x, c.ay - this.ship.y) < 160) continue
+      this.turretCornerIndex = (this.turretCornerIndex + i + 1) % 4
+      this.drones.push({
+        x: c.sx, y: c.sy, vx: 0, vy: 0, r: 24, t: rand(0, 6),
+        hp: 15, kind: 'mob-laser', laserT: 0, nextFire: 2.4, alpha: 0,
+        turretCorner: { x: c.ax, y: c.ay },
+      })
+      return
+    }
+  }
+
+  private turretTiming(d: Drone): { warning: boolean; firing: boolean } {
+    const CYCLE = 2.6, WARN = 0.85, FIRE = 0.5
+    const t = d.laserT ?? 0
+    const nf = d.nextFire ?? t + CYCLE
+    return { warning: t >= nf - WARN && t < nf, firing: t >= nf && t < nf + FIRE }
+  }
+
+  private updateTurretLaser(d: Drone, dt: number) {
+    const CYCLE = 2.6, WARN = 0.85, FIRE = 0.5
+    if (d.laserT === undefined) d.laserT = 0
+    if (d.laserAngle === undefined) d.laserAngle = Math.atan2(this.w / 2 - d.x, -(this.h * 0.4 - d.y))
+    d.laserT += dt
+    const t = d.laserT
+    const nf = d.nextFire ?? t + CYCLE
+    if (t < nf - WARN) {
+      // idle: drift the barrel slowly toward the player without aiming
+      const want = Math.atan2(this.ship.x - d.x, -(this.ship.y - d.y))
+      let delta = want - d.laserAngle
+      delta = Math.atan2(Math.sin(delta), Math.cos(delta))
+      d.laserAngle += Math.max(-0.5 * dt, Math.min(0.5 * dt, delta))
+    } else if (t < nf) {
+      // telegraph: lock on the ship's position once, hold the aim
+      if (d.lockedAngle === undefined) d.lockedAngle = Math.atan2(this.ship.x - d.x, -(this.ship.y - d.y))
+      d.laserAngle = d.lockedAngle
+    } else if (t < nf + FIRE) {
+      // beam — damage check against the locked line
+      d.laserAngle = d.lockedAngle ?? d.laserAngle
+      const dx = this.ship.x - d.x, dy = this.ship.y - d.y
+      const fx = Math.sin(d.laserAngle), fy = -Math.cos(d.laserAngle)
+      const proj = dx * fx + dy * fy
+      const cross = Math.abs(dx * fy - dy * fx)
+      const blen = this.beamLength(d, d.laserAngle)
+      if (proj >= 0 && proj <= blen && cross < this.ship.r + 4 && this.ship.inv <= 0 && this.pShield <= 0) this.damageShip()
+    } else {
+      d.nextFire = t + CYCLE
+      d.lockedAngle = undefined
+    }
   }
 
   private queueMeteorWave() {
@@ -1079,7 +1158,11 @@ export class Game {
       this.retiring.push({ type: 'bar', bar, alpha: 1 })
     }
     for (const d of this.drones) {
-      if (d.orbit) {
+      if (d.turretCorner) {
+        // shoot back out toward the corner they came from
+        d.exitVX = (d.x < this.w / 2 ? -1 : 1) * 300
+        d.exitVY = (d.y < this.h / 2 ? -1 : 1) * 300
+      } else if (d.orbit) {
         // fly straight out, radially away from the arena centre with a downward bias
         let ox = d.x - d.orbit.cx, oy = d.y - d.orbit.cy
         const len = Math.hypot(ox, oy) || 1
@@ -1120,6 +1203,7 @@ export class Game {
   private updateDrones(dt: number) {
     const sentinelPhase = this.course === 'nebula' && this.phaseIdx === 1
     const kamikazePhase = this.course === 'nebula' && this.phaseIdx === 2
+    const turretPhase = this.course === 'nebula' && this.phaseIdx === 3
     if (sentinelPhase) {
       if (this.phaseStage !== 'exit' && this.sentinelsSpawned < 3) {
         this.spawnT -= dt
@@ -1131,6 +1215,14 @@ export class Game {
       if (this.phaseStage !== 'exit' && this.spawnT <= 0 && this.drones.length < cap) {
         this.spawnT = this.phaseT < 12 ? 1.75 : 1.3
         this.spawnKamikaze()
+      }
+    } else if (turretPhase) {
+      this.spawnT -= dt
+      // corner turrets guard the arena — keep two of them alive at all times
+      const live = this.drones.filter(d => d.turretCorner).length
+      if (this.phaseStage !== 'exit' && this.spawnT <= 0 && live < 2) {
+        this.spawnT = 6.0
+        this.spawnCornerTurret()
       }
     } else {
       this.spawnT -= dt
@@ -1158,6 +1250,15 @@ export class Game {
           d.x += d.vx * dt
           d.y += d.vy * dt
         }
+      } else if (d.turretCorner) {
+        // slide in from off-screen to the corner anchor
+        const dx = d.turretCorner.x - d.x, dy = d.turretCorner.y - d.y
+        const dl = Math.hypot(dx, dy)
+        if (dl > 1) {
+          const step = Math.min(dl, 150 * dt)
+          d.x += dx / dl * step
+          d.y += dy / dl * step
+        }
       } else if (d.orbit) {
         // persistent sentinel — elliptical orbit around the arena centre
         d.orbit.phase += d.orbit.speed * dt
@@ -1184,7 +1285,8 @@ export class Game {
       }
       // beams only deal damage once the drone is mostly visible
       if (this.phaseStage === 'active' && (d.alpha ?? 1) > 0.5) {
-        if (d.orbit) this.updateSentinelLaser(d, dt)
+        if (d.turretCorner) this.updateTurretLaser(d, dt)
+        else if (d.orbit) this.updateSentinelLaser(d, dt)
         else this.updateLaser(d, dt)
       }
       // shoot at ship (scouts only; laser mobs use their beam)
@@ -1233,13 +1335,22 @@ export class Game {
           d.x = d.enterX + (ox - d.enterX) * k
           d.y = (d.enterY ?? -50) + (oy - (d.enterY ?? -50)) * k
         } else { d.x = ox; d.y = oy }
+      } else if (d.turretCorner) {
+        const dx = d.turretCorner.x - d.x, dy = d.turretCorner.y - d.y
+        const dl = Math.hypot(dx, dy)
+        if (dl > 1) {
+          const step = Math.min(dl, 150 * dt)
+          d.x += dx / dl * step
+          d.y += dy / dl * step
+        }
       } else {
         d.x += d.vx * dt
         d.y += Math.sin(d.t * 3) * 40 * dt
         if (d.x < -60 || d.x > this.w + 60) continue
       }
       if (this.phaseStage === 'active' && (d.alpha ?? 1) > 0.5) {
-        if (d.orbit) this.updateSentinelLaser(d, dt)
+        if (d.turretCorner) this.updateTurretLaser(d, dt)
+        else if (d.orbit) this.updateSentinelLaser(d, dt)
         else this.updateLaser(d, dt)
       }
       // still shoot at ship (scouts only; laser mobs use their beam)
@@ -2535,7 +2646,8 @@ export class Game {
       ctx.save()
       ctx.globalAlpha = a
       const isLaser = d.kind === 'mob-laser'
-      const timing = d.orbit ? this.sentinelTiming(d) : { warning: false, firing: Boolean(isLaser && d.laserT !== undefined && d.laserT < 0.6) }
+      const isTurret = d.turretCorner !== undefined
+      const timing = isTurret ? this.turretTiming(d) : d.orbit ? this.sentinelTiming(d) : { warning: false, firing: Boolean(isLaser && d.laserT !== undefined && d.laserT < 0.6) }
       const firing = timing.firing
       const rotation = isLaser && d.laserAngle !== undefined ? d.laserAngle : (d.vx < 0 ? Math.PI / 2 : -Math.PI / 2)
       drawDesign(ctx, {
@@ -2548,10 +2660,10 @@ export class Game {
       if (isLaser && d.laserAngle !== undefined && (timing.warning || firing)) {
         const len = this.beamLength(d, d.laserAngle)
         const dx = Math.sin(d.laserAngle), dy = -Math.cos(d.laserAngle)
-        ctx.strokeStyle = firing ? '#ff9ac4' : '#ff2d78'
+        ctx.strokeStyle = isTurret ? (firing ? '#fca5a5' : '#ef4444') : (firing ? '#ff9ac4' : '#ff2d78')
         ctx.globalAlpha = firing ? 0.95 : 0.45
         ctx.lineWidth = firing ? 6 : 2
-        ctx.shadowColor = '#ff2d78'
+        ctx.shadowColor = isTurret ? '#ef4444' : '#ff2d78'
         ctx.shadowBlur = firing ? 16 : 5
         if (!firing) ctx.setLineDash([7, 9])
         ctx.beginPath(); ctx.moveTo(d.x, d.y); ctx.lineTo(d.x + dx * len, d.y + dy * len); ctx.stroke()
@@ -2605,12 +2717,12 @@ export class Game {
       const max = horizontal ? this.w : this.h
       const a0 = gate.gap - gate.gapSize / 2
       const a1 = gate.gap + gate.gapSize / 2
-      const firing = gate.warning <= 0 && gate.active > 0
+      const firing = gate.warning <= 0
       ctx.save()
-      ctx.strokeStyle = firing ? '#a5f3fc' : '#22d3ee'
+      ctx.strokeStyle = firing ? '#fca5a5' : '#ef4444'
       ctx.globalAlpha = gate.alpha * (firing ? 0.95 : 0.35 + Math.sin(this.time * 10) * 0.12)
       ctx.lineWidth = firing ? 7 : 2
-      ctx.shadowColor = '#22d3ee'
+      ctx.shadowColor = '#ef4444'
       ctx.shadowBlur = firing ? 18 : 4
       if (!firing) ctx.setLineDash([8, 10])
       ctx.beginPath()

@@ -115,25 +115,22 @@ function steeringScript() {
       }
       return 99
     }
-    // --- phase 3: laser gates
+    // --- phase 3: laser gates (moving walls — threat when the wall's band is within ~1.2s of our row/col)
     for (const gate of g.laserGates) {
-      if (gate.alpha <= 0.3) continue
-      const armed = gate.warning <= 0 && gate.active > 0
-      const coming = gate.warning > 0 && gate.warning < 0.55 // close enough that we must be ready
-      if (!armed && !coming) continue
+      if (gate.alpha <= 0.3 || gate.warning > 0) continue
       if (gate.orientation === 'vertical') {
+        const near = Math.abs(gate.pos - sx) < Math.abs(gate.speed) * 1.2 + 60
+        if (!near) continue
         const gapLo = gate.gap - gate.gapSize / 2 + 20 * 0.35
         const gapHi = gate.gap + gate.gapSize / 2 - 20 * 0.35
         if (rowY < gapLo || rowY > gapHi) {
-          // row is outside the gap: the whole column band is dangerous
+          // row is outside the gap: the column band is dangerous as it sweeps over us
           zones.push([gate.pos, 400])
           hardGap = null
-        } else {
-          // row is inside the gap: nothing extra to do, the vertical override below keeps y
         }
       } else {
-        // horizontal gates live mid-screen; only a threat if we play up high
-        if (Math.abs(rowY - gate.pos) < 60) {
+        // wall sweeps down (or up): deadly when its band crosses our row
+        if (Math.abs(gate.pos - rowY) < Math.abs(gate.speed) * 1.2 + 50) {
           const lo = gate.gap - gate.gapSize / 2 + 7, hi = gate.gap + gate.gapSize / 2 - 7
           zones.push([lo / 2, lo / 2 + 1]); zones.push([(w + hi) / 2, (w - hi) / 2 + 1])
         }
@@ -290,10 +287,10 @@ function steeringScript() {
       }
       if (!isFinite(bs)) best = w / 2
     }
-    // vertical intent from gates/meteor telegraphs overrides rowY
+    // vertical intent from moving gate walls overrides rowY: slip through the gap as the wall sweeps by
     for (const gate of g.laserGates) {
-      if (gate.orientation === 'vertical' && gate.alpha > 0.3 &&
-          (gate.warning <= 0.55 || gate.active > 0) &&
+      if (gate.orientation === 'vertical' && gate.alpha > 0.3 && gate.warning <= 0 &&
+          Math.abs(gate.pos - sx) < Math.abs(gate.speed) * 1.4 + 80 &&
           (rowY < gate.gap - gate.gapSize / 2 + 7 || rowY > gate.gap + gate.gapSize / 2 - 7)) {
         by = gate.gap
       }
